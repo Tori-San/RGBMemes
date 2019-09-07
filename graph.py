@@ -1,8 +1,4 @@
-import sacn
 import json
-
-sender = sacn.sACNsender()
-receiver = sacn.sACNreceiver()
 
 
 class Edge:
@@ -49,15 +45,17 @@ class Node:
         return decorator
 
     @classmethod
-    def json_hook(cls, d):
-        if 'type' in d and d['type'] in cls.__types:
-            return cls.__types[d['type']](**d)
-        return d
+    def json_hook(cls, sender, receiver):
+        def hook(d):
+            if 'type' in d and d['type'] in cls.__types:
+                return cls.__types[d['type']](sender=sender, receiver=receiver, **d)
+            return d
+
+        return hook
 
 
-def parse(filename):
-    with open(filename, 'r') as f:
-        data = json.load(f, object_hook=Node.json_hook)
+def parse(s, sender, receiver):
+    data = json.loads(s, object_hook=Node.json_hook(sender, receiver))
     env = {node.id: node for node in data['nodes']}
 
     for [source, target] in data['edges']:
@@ -70,17 +68,18 @@ def parse(filename):
 
 @Node.type('source')
 class SourceNode(Node):
-    def __init__(self, id, universe, **kwargs):
+    def __init__(self, id, universe, receiver, **kwargs):
         del kwargs  # ignored
 
         super().__init__(id)
         self.universe = universe
+        self.receiver = receiver
 
         self.state = (0,) * 513
 
-        receiver.join_multicast(self.universe)
+        self.receiver.join_multicast(self.universe)
 
-        @receiver.listen_on('universe', universe=self.universe)
+        @self.receiver.listen_on('universe', universe=self.universe)
         def handler(packet):
             self.state = (0,) + packet.dmxData
             self.propagate()
@@ -91,29 +90,30 @@ class SourceNode(Node):
 
 @Node.type('sink')
 class SinkNode(Node):
-    def __init__(self, id, universe, **kwargs):
+    def __init__(self, id, universe, sender, **kwargs):
         del kwargs  # ignored
 
         super().__init__(id)
         self.universe = universe
+        self.sender = sender
 
         self.state = [0] * 513
 
-        sender.activate_output(self.universe)
-        sender[self.universe].multicast = True
+        self.sender.activate_output(self.universe)
+        self.sender[self.universe].multicast = True
 
     def __setitem__(self, key, value):
         self.state[key] = value
 
     def update(self):
         super().update()
-        sender[self.universe].dmx_data = tuple(self.state[1:])
+        self.sender[self.universe].dmx_data = tuple(self.state[1:])
 
 
 @Node.type('python')
 class PythonNode(Node):
     def __init__(self, id, inputs, outputs, code, **kwargs):
-        del kwargs  # ignore
+        del kwargs  # ignored
 
         object.__setattr__(self, 'inputs', inputs)  # necessary due to __setattr__
         super().__init__(id)
@@ -143,21 +143,3 @@ class PythonNode(Node):
             self.output_state[output] = env.get(output)
 
         self.propagate()
-
-
-if __name__ == '__main__':
-    parse('g.json')
-
-    sender.start()
-    receiver.start()
-
-    try:
-        import time
-
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        pass
-
-    receiver.stop()
-    sender.stop()
